@@ -17,6 +17,7 @@
     "db:migrate": "npm run db:migrate -w @hvnp/backend",
     "db:seed": "npm run db:seed -w @hvnp/backend",
     "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,json,md}\""
   },
