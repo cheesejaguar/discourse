@@ -130,10 +130,11 @@ function EventCard({ event, query }: { event: NewsEvent; query: string }) {
   // Highlight matching text
   const highlightText = (text: string) => {
     if (!query) return text;
-    const regex = new RegExp(`(${query})`, 'gi');
-    const parts = text.split(regex);
+    // Escape regex metacharacters so queries like "c++" don't throw
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
     return parts.map((part, i) =>
-      regex.test(part) ? (
+      part.toLowerCase() === query.toLowerCase() ? (
         <mark key={i} className="bg-yellow-200 rounded px-0.5">
           {part}
         </mark>

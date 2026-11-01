@@ -1,131 +1,111 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-
-// Create mock function with vi.hoisted so it's available during mock setup
-const mockRefreshUser = vi.hoisted(() => vi.fn());
-
-// Mock the auth store - useAuthStore accepts a selector function
-vi.mock('./store/auth', () => ({
-  useAuthStore: (selector?: (state: any) => any) => {
-    const state = {
-      refreshUser: mockRefreshUser,
-      user: null,
-      isAuthenticated: false,
-      logout: vi.fn(),
-    };
-    return selector ? selector(state) : state;
-  },
-}));
-
-// Mock the pages
-vi.mock('./pages/HomePage', () => ({
-  default: () => <div data-testid="home-page">Home Page</div>,
-}));
-
-vi.mock('./pages/EventPage', () => ({
-  default: () => <div data-testid="event-page">Event Page</div>,
-}));
-
-vi.mock('./pages/UserPage', () => ({
-  default: () => <div data-testid="user-page">User Page</div>,
-}));
-
-vi.mock('./pages/SearchPage', () => ({
-  default: () => <div data-testid="search-page">Search Page</div>,
-}));
-
-vi.mock('./pages/CategoryPage', () => ({
-  default: () => <div data-testid="category-page">Category Page</div>,
-}));
-
-// Mock the Layout component - use Outlet for child route rendering
-vi.mock('./components/Layout', async () => {
-  const { Outlet } = await import('react-router-dom');
-  return {
-    default: () => (
-      <div data-testid="layout">
-        <Outlet />
-      </div>
-    ),
-  };
-});
-
-// Import after mocks
 import App from './App';
+import { useAuthStore } from './store/auth';
+import { mockFetch, ok, fail, requests } from './test/fetch';
+
+const pagination = { page: 1, limit: 20, total: 0, totalPages: 0, hasNext: false, hasPrev: false };
+
+const event = {
+  id: 'e1',
+  slug: 'test-event',
+  title: 'Routed Event',
+  summary: 'summary',
+  category: 'WORLD',
+  isTrending: false,
+  commentCount: 0,
+  articles: [],
+  createdAt: '2024-01-01T00:00:00Z',
+  updatedAt: '2024-01-01T00:00:00Z',
+};
+
+const user = {
+  id: 'test-user',
+  displayName: 'RoutedUser',
+  karma: 1,
+  isVerified: true,
+  createdAt: '2024-01-01T00:00:00Z',
+  commentCount: 0,
+  totalUpvotes: 0,
+};
+
+const renderAt = (path: string) =>
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+    </MemoryRouter>
+  );
 
 describe('App', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  it('should render the home page inside the layout at /', async () => {
+    mockFetch({ 'GET /events': ok([], pagination), 'GET /events/trending': ok([]) });
+
+    renderAt('/');
+
+    expect(await screen.findByText('Latest News')).toBeInTheDocument();
+    expect(screen.getByText('Human-Verified News')).toBeInTheDocument();
   });
 
-  it('should render home page at root path', () => {
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <App />
-      </MemoryRouter>
-    );
+  it('should render the event page at /event/:eventId', async () => {
+    mockFetch({ 'GET /events/test-event': ok(event), 'GET /comments': ok([], pagination) });
 
-    expect(screen.getByTestId('home-page')).toBeInTheDocument();
+    renderAt('/event/test-event');
+
+    expect(await screen.findByRole('heading', { name: 'Routed Event' })).toBeInTheDocument();
   });
 
-  it('should render event page at /event/:eventId', () => {
-    render(
-      <MemoryRouter initialEntries={['/event/test-event']}>
-        <App />
-      </MemoryRouter>
-    );
+  it('should render the user page at /user/:userId', async () => {
+    mockFetch({ 'GET /users/test-user': ok(user), 'GET /users/test-user/comments': ok([], pagination) });
 
-    expect(screen.getByTestId('event-page')).toBeInTheDocument();
+    renderAt('/user/test-user');
+
+    expect(await screen.findByRole('heading', { name: 'RoutedUser' })).toBeInTheDocument();
   });
 
-  it('should render user page at /user/:userId', () => {
-    render(
-      <MemoryRouter initialEntries={['/user/test-user']}>
-        <App />
-      </MemoryRouter>
-    );
+  it('should render the search page at /search', async () => {
+    mockFetch({});
 
-    expect(screen.getByTestId('user-page')).toBeInTheDocument();
+    renderAt('/search');
+
+    expect(await screen.findByText('Enter a search term to find news discussions')).toBeInTheDocument();
   });
 
-  it('should render search page at /search', () => {
-    render(
-      <MemoryRouter initialEntries={['/search']}>
-        <App />
-      </MemoryRouter>
-    );
+  it('should render the category page at /category/:category', async () => {
+    mockFetch({ 'GET /events': ok([], pagination) });
 
-    expect(screen.getByTestId('search-page')).toBeInTheDocument();
+    renderAt('/category/technology');
+
+    expect(await screen.findByText('Technology News')).toBeInTheDocument();
   });
 
-  it('should render category page at /category/:category', () => {
-    render(
-      <MemoryRouter initialEntries={['/category/technology']}>
-        <App />
-      </MemoryRouter>
-    );
+  it('should not call /auth/me on mount without a stored token', async () => {
+    mockFetch({});
 
-    expect(screen.getByTestId('category-page')).toBeInTheDocument();
+    renderAt('/search');
+    await screen.findByText('Enter a search term to find news discussions');
+
+    expect(requests).toHaveLength(0);
   });
 
-  it('should call refreshUser on mount', () => {
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>
-    );
+  it('should refresh the user from /auth/me on mount when a token is stored', async () => {
+    useAuthStore.setState({ token: 'stored-token' });
+    mockFetch({ 'GET /auth/me': ok({ ...user, displayName: 'RestoredUser' }) });
 
-    expect(mockRefreshUser).toHaveBeenCalled();
+    renderAt('/search');
+
+    expect(await screen.findByText('RestoredUser')).toBeInTheDocument();
+    expect(requests[0].headers.Authorization).toBe('Bearer stored-token');
   });
 
-  it('should wrap routes in Layout', () => {
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>
-    );
+  it('should sign out locally when the stored token is rejected on mount', async () => {
+    useAuthStore.setState({ token: 'expired-token' });
+    mockFetch({ 'GET /auth/me': fail(401, 'AUTH_TOKEN_EXPIRED', 'Session has expired') });
 
-    expect(screen.getByTestId('layout')).toBeInTheDocument();
+    renderAt('/search');
+
+    expect(await screen.findByText('Sign In')).toBeInTheDocument();
+    await screen.findByText('Enter a search term to find news discussions');
+    expect(useAuthStore.getState().token).toBeNull();
   });
 });

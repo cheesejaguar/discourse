@@ -12,6 +12,7 @@
     "db:migrate:prod": "prisma migrate deploy",
     "db:seed": "tsx src/db/seed.ts",
     "db:studio": "prisma studio",
+    "pretest": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -43,6 +44,7 @@
     "@types/uuid": "^9.0.7",
     "@types/ws": "^8.5.10",
     "@vitest/coverage-v8": "^1.1.0",
+    "embedded-postgres": "^17.10.0-beta.17",
     "prisma": "^5.7.0",
     "supertest": "^6.3.3",
     "tsx": "^4.6.2",

@@ -1,5 +1,7 @@
 import type { ApiResponse, PaginationInfo } from '@hvnp/shared';
 
+export type { PaginationInfo };
+
 const API_BASE = '/api';
 
 interface FetchOptions extends RequestInit {

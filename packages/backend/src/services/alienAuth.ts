@@ -68,18 +68,24 @@ export class AlienAuthService {
         };
       }
 
+      // A payload missing any required field can never be valid
+      if (!payload.alienId || !payload.signature || !payload.nonce) {
+        return {
+          isValid: false,
+          error: 'Invalid authentication payload',
+        };
+      }
+
       // In production, this would verify the signature using Alien's public key
       // and confirm the alienId is valid through their CHVP (Continuous Human Verification Protocol)
 
       // Mock verification for development
       if (config.isDev) {
         // In dev mode, accept any payload with a valid structure
-        if (payload.alienId && payload.signature && payload.nonce) {
-          return {
-            isValid: true,
-            alienId: payload.alienId,
-          };
-        }
+        return {
+          isValid: true,
+          alienId: payload.alienId,
+        };
       }
 
       // Production: Call Alien's verification endpoint

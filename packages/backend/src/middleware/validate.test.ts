@@ -71,7 +71,7 @@ describe('Validation Middleware', () => {
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
       expect(mockReq.body).toEqual({ count: 42 });
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
     });
 
     it('should validate query parameters', () => {
@@ -84,7 +84,7 @@ describe('Validation Middleware', () => {
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
       expect(mockReq.query).toEqual({ page: 5 });
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
     });
 
     it('should validate path parameters', () => {
@@ -96,7 +96,8 @@ describe('Validation Middleware', () => {
 
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockRes.status).not.toHaveBeenCalled();
     });
 
     it('should call next with error for non-Zod errors', () => {
@@ -109,43 +110,92 @@ describe('Validation Middleware', () => {
 
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
-      expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
+      expect(mockNext).toHaveBeenCalledWith(expect.objectContaining({ message: 'Non-Zod error' }));
+      expect(mockRes.status).not.toHaveBeenCalled();
     });
   });
 
   describe('validateBody', () => {
-    it('should create body validator', () => {
-      const schema = z.object({ test: z.string() });
-      const middleware = validateBody(schema);
+    const schema = z.object({ test: z.coerce.number() });
 
-      mockReq.body = { test: 'value' };
+    it('should validate and replace req.body only', () => {
+      const middleware = validateBody(schema);
+      mockReq.body = { test: '7' };
+      mockReq.query = { test: 'not-a-number' };
+
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockReq.body).toEqual({ test: 7 });
+      expect(mockReq.query).toEqual({ test: 'not-a-number' });
+    });
+
+    it('should reject an invalid body', () => {
+      const middleware = validateBody(schema);
+      mockReq.body = { test: 'abc' };
+
+      middleware(mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(400);
+      expect(mockNext).not.toHaveBeenCalled();
     });
   });
 
   describe('validateQuery', () => {
-    it('should create query validator', () => {
-      const schema = z.object({ search: z.string().optional() });
-      const middleware = validateQuery(schema);
+    const schema = z.object({ search: z.string().min(2) });
 
-      mockReq.query = { search: 'test' };
+    it('should validate and replace req.query only', () => {
+      const middleware = validateQuery(schema);
+      mockReq.query = { search: 'test', extra: 'dropped' };
+      mockReq.body = {};
+
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockReq.query).toEqual({ search: 'test' });
+      expect(mockReq.body).toEqual({});
+    });
+
+    it('should reject an invalid query', () => {
+      const middleware = validateQuery(schema);
+      mockReq.query = { search: 'x' };
+
+      middleware(mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(400);
+      expect(mockNext).not.toHaveBeenCalled();
     });
   });
 
   describe('validateParams', () => {
-    it('should create params validator', () => {
-      const schema = z.object({ id: z.string() });
-      const middleware = validateParams(schema);
+    const schema = z.object({ id: z.string().uuid() });
 
-      mockReq.params = { id: 'abc123' };
+    it('should validate req.params', () => {
+      const middleware = validateParams(schema);
+      mockReq.params = { id: '123e4567-e89b-12d3-a456-426614174000' };
+
       middleware(mockReq as Request, mockRes as Response, mockNext);
 
-      expect(mockNext).toHaveBeenCalled();
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockReq.params).toEqual({ id: '123e4567-e89b-12d3-a456-426614174000' });
+    });
+
+    it('should reject invalid params with the failing field', () => {
+      const middleware = validateParams(schema);
+      mockReq.params = { id: 'abc123' };
+
+      middleware(mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(400);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.VALIDATION_ERROR,
+          message: 'Validation failed',
+          details: { errors: [{ field: 'id', message: 'Invalid uuid' }] },
+        },
+      });
+      expect(mockNext).not.toHaveBeenCalled();
     });
   });
 });

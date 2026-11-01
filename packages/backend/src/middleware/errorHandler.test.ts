@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { Request, Response } from 'express';
 import {
   AppError,
@@ -11,13 +11,8 @@ import {
   notFoundHandler,
 } from './errorHandler.js';
 import { ERROR_CODES } from '@hvnp/shared';
-
-// Mock config
-vi.mock('../config/index.js', () => ({
-  config: {
-    isDev: true,
-  },
-}));
+import { prisma } from '../db/client.js';
+import { resetDatabase, createUser } from '../test/db.js';
 
 describe('Error Classes', () => {
   describe('AppError', () => {
@@ -164,7 +159,76 @@ describe('errorHandler middleware', () => {
     errorHandler(error, mockReq as Request, mockRes as Response, mockNext);
 
     const response = (mockRes.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(response.error).toHaveProperty('stack');
+    expect(response.error.stack).toBe(error.stack);
+  });
+
+  it('should hide message and stack trace in production', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    vi.resetModules();
+    try {
+      const { errorHandler: prodErrorHandler } = await import('./errorHandler.js');
+
+      prodErrorHandler(new Error('secret internals'), mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(500);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.INTERNAL_ERROR,
+          message: 'An unexpected error occurred',
+        },
+      });
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+      vi.resetModules();
+    }
+  });
+
+  describe('Prisma errors (from a real database)', () => {
+    beforeEach(async () => {
+      await resetDatabase();
+    });
+
+    afterAll(async () => {
+      await prisma.$disconnect();
+    });
+
+    it('should map a unique constraint violation (P2002) to 409', async () => {
+      const user = await createUser({ displayName: 'Taken' });
+      const error = await prisma.user
+        .create({ data: { alienId: `${user.alienId}-other`, displayName: 'Taken' } })
+        .catch((e: Error) => e);
+
+      errorHandler(error as Error, mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(409);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.VALIDATION_ERROR,
+          message: 'A record with this value already exists',
+          details: expect.objectContaining({ target: ['display_name'] }),
+        },
+      });
+    });
+
+    it('should map a missing record (P2025) to 404', async () => {
+      const error = await prisma.user
+        .update({ where: { id: 'does-not-exist' }, data: { bio: 'x' } })
+        .catch((e: Error) => e);
+
+      errorHandler(error as Error, mockReq as Request, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(404);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.NOT_FOUND,
+          message: 'Record not found',
+        },
+      });
+    });
   });
 });
 

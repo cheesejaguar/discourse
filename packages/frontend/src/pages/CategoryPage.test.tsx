@@ -1,19 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import CategoryPage from './CategoryPage';
+import { mockFetch, ok, fail, requestsTo, pending } from '../test/fetch';
 
-// Mock the API
-vi.mock('../lib/api', () => ({
-  eventsApi: {
-    list: vi.fn(),
-  },
-}));
-
-// Mock date-fns
-vi.mock('date-fns', () => ({
-  formatDistanceToNow: () => '5 minutes ago',
-}));
+const NOW = new Date('2024-01-02T00:05:00Z');
 
 const mockEvents = [
   {
@@ -21,11 +12,12 @@ const mockEvents = [
     slug: 'tech-event-1',
     title: 'Technology News Event',
     summary: 'Summary of tech event',
-    category: 'technology',
+    category: 'TECHNOLOGY',
     isTrending: true,
     commentCount: 10,
     sourceCount: 5,
-    createdAt: '2024-01-01T00:00:00Z',
+    createdAt: '2024-01-02T00:00:00Z',
+    updatedAt: '2024-01-02T00:00:00Z',
     imageUrl: 'https://example.com/image.jpg',
     sources: [
       { id: 's1', name: 'TechNews', biasRating: 'CENTER' },
@@ -37,393 +29,254 @@ const mockEvents = [
     slug: 'tech-event-2',
     title: 'Another Tech Story',
     summary: 'Another summary',
-    category: 'technology',
+    category: 'TECHNOLOGY',
     isTrending: false,
     commentCount: 3,
     sourceCount: 2,
-    createdAt: '2024-01-02T00:00:00Z',
+    createdAt: '2024-01-01T00:05:00Z',
+    updatedAt: '2024-01-01T00:05:00Z',
     imageUrl: null,
     sources: [],
   },
 ];
 
-const renderWithRouter = (category: string = 'technology') => {
-  return render(
+function pageInfo(page: number, total: number, totalPages: number) {
+  return { page, limit: 20, total, totalPages, hasNext: page < totalPages, hasPrev: page > 1 };
+}
+
+const renderPage = (category: string = 'technology') =>
+  render(
     <MemoryRouter initialEntries={[`/category/${category}`]}>
       <Routes>
         <Route path="/category/:category" element={<CategoryPage />} />
       </Routes>
     </MemoryRouter>
   );
-};
+
+/** Paged backend: the title of each event includes the page it came from */
+function mockPagedEvents(totalPages: number) {
+  mockFetch({
+    'GET /events': (req) => {
+      const page = Number(req.query.page);
+      return ok(
+        [{ ...mockEvents[0], id: `p${page}`, title: `Story on page ${page}` }],
+        pageInfo(page, totalPages * 20, totalPages)
+      );
+    },
+  });
+}
 
 describe('CategoryPage', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
   });
 
-  it('should display category header', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should request the upper-cased category, page 1, limit 20', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter('technology');
+    renderPage();
+    await screen.findByText('Technology News Event');
 
-    await waitFor(() => {
-      expect(screen.getByText('Technology News')).toBeInTheDocument();
-    });
+    expect(requestsTo('GET /events')[0].query).toEqual({ category: 'TECHNOLOGY', page: '1', limit: '20' });
   });
 
-  it('should display category badge', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display category header and badge', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter('technology');
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('Technology')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('Technology News')).toBeInTheDocument();
+    expect(screen.getByText('Technology', { selector: 'span' })).toHaveClass('bg-blue-100');
   });
 
-  it('should display story count', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display plural story count', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('2 stories')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('2 stories')).toBeInTheDocument();
   });
 
   it('should display singular story count', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: [mockEvents[0]],
-      pagination: { page: 1, total: 1, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+    mockFetch({ 'GET /events': ok([mockEvents[0]], pageInfo(1, 1, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('1 story')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('1 story')).toBeInTheDocument();
   });
 
-  it('should display event cards', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display event cards linking to events', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('Technology News Event')).toBeInTheDocument();
-      expect(screen.getByText('Another Tech Story')).toBeInTheDocument();
-    });
+    expect((await screen.findByText('Technology News Event')).closest('a')).toHaveAttribute('href', '/event/tech-event-1');
+    expect(screen.getByText('Another Tech Story').closest('a')).toHaveAttribute('href', '/event/tech-event-2');
+    expect(screen.getByText('Summary of tech event')).toBeInTheDocument();
   });
 
-  it('should display trending badge for trending events', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display trending badge only for trending events', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('Trending')).toBeInTheDocument();
-    });
+    await screen.findByText('Technology News Event');
+    expect(screen.getAllByText('Trending')).toHaveLength(1);
   });
 
-  it('should display event image when available', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display event image only when available', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      const images = document.querySelectorAll('img');
-      expect(images.length).toBe(1);
-      expect(images[0]).toHaveAttribute('src', 'https://example.com/image.jpg');
-    });
+    await screen.findByText('Technology News Event');
+    const images = document.querySelectorAll('img');
+    expect(images).toHaveLength(1);
+    expect(images[0]).toHaveAttribute('src', 'https://example.com/image.jpg');
   });
 
   it('should display source and comment counts', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('5 sources')).toBeInTheDocument();
-      expect(screen.getByText('10 comments')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('5 sources')).toBeInTheDocument();
+    expect(screen.getByText('10 comments')).toBeInTheDocument();
+    expect(screen.getByText('2 sources')).toBeInTheDocument();
+    expect(screen.getByText('3 comments')).toBeInTheDocument();
   });
 
-  it('should display time ago', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should display relative time for each event', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      const timeElements = screen.getAllByText('5 minutes ago');
-      expect(timeElements.length).toBeGreaterThan(0);
-    });
+    expect(await screen.findByText('5 minutes ago')).toBeInTheDocument();
+    expect(screen.getByText('1 day ago')).toBeInTheDocument();
   });
 
   it('should display source bias indicators', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      const biasIndicators = document.querySelectorAll('.rounded-full.w-2.h-2');
-      expect(biasIndicators.length).toBeGreaterThan(0);
-    });
+    await screen.findByText('Technology News Event');
+    expect(screen.getByTitle('TechNews (CENTER)')).toHaveClass('bias-CENTER');
+    expect(screen.getByTitle('CNN (LEFT)')).toHaveClass('bias-LEFT');
   });
 
-  it('should show loading skeleton while fetching', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockImplementation(() => new Promise(() => {}));
+  it('should show at most 5 source indicators plus an overflow count', async () => {
+    const sources = Array.from({ length: 7 }, (_, i) => ({ id: `s${i}`, name: `Source ${i}`, biasRating: null }));
+    mockFetch({ 'GET /events': ok([{ ...mockEvents[0], sources }], pageInfo(1, 1, 1)) });
 
-    renderWithRouter();
+    renderPage();
+
+    await screen.findByText('Technology News Event');
+    expect(screen.getAllByTitle(/Unknown bias/)).toHaveLength(5);
+    expect(screen.getByText('+2')).toBeInTheDocument();
+  });
+
+  it('should show loading skeleton while fetching', () => {
+    mockFetch({ 'GET /events': () => pending() });
+
+    renderPage();
 
     expect(document.querySelector('.skeleton')).toBeInTheDocument();
   });
 
   it('should display empty state when no events', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: [],
-      pagination: { page: 1, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
-    });
+    mockFetch({ 'GET /events': ok([], pageInfo(1, 0, 0)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('No technology news found')).toBeInTheDocument();
-      expect(screen.getByText('Browse all news')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('No technology news found')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Browse all news' })).toHaveAttribute('href', '/');
   });
 
   it('should display pagination when multiple pages', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 50, totalPages: 3, hasNext: true, hasPrev: false },
-    });
+    mockPagedEvents(3);
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('Page 1 of 3')).toBeInTheDocument();
-      expect(screen.getByText('Previous')).toBeInTheDocument();
-      expect(screen.getByText('Next')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('Page 1 of 3')).toBeInTheDocument();
+    expect(screen.getByText('Previous')).toBeDisabled();
+    expect(screen.getByText('Next')).toBeEnabled();
   });
 
-  it('should disable previous button on first page', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 50, totalPages: 3, hasNext: true, hasPrev: false },
-    });
-
-    renderWithRouter();
-
-    await waitFor(() => {
-      const prevButton = screen.getByText('Previous');
-      expect(prevButton).toBeDisabled();
-    });
-  });
-
-  it('should navigate to next page', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 50, totalPages: 3, hasNext: true, hasPrev: false },
-    });
-
-    renderWithRouter();
-
-    await waitFor(() => {
-      expect(screen.getByText('Next')).toBeInTheDocument();
-    });
+  it('should load the next page when Next is clicked', async () => {
+    mockPagedEvents(3);
+    renderPage();
+    await screen.findByText('Story on page 1');
 
     fireEvent.click(screen.getByText('Next'));
 
-    await waitFor(() => {
-      expect(eventsApi.list).toHaveBeenCalledWith(
-        expect.objectContaining({ page: 2 })
-      );
-    });
+    expect(await screen.findByText('Story on page 2')).toBeInTheDocument();
+    expect(screen.getByText('Page 2 of 3')).toBeInTheDocument();
+    expect(requestsTo('GET /events').map((r) => r.query.page)).toEqual(['1', '2']);
   });
 
-  it('should navigate to previous page', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list
-      .mockResolvedValueOnce({
-        events: mockEvents,
-        pagination: { page: 1, total: 50, totalPages: 3, hasNext: true, hasPrev: false },
-      })
-      .mockResolvedValueOnce({
-        events: mockEvents,
-        pagination: { page: 2, total: 50, totalPages: 3, hasNext: true, hasPrev: true },
-      })
-      .mockResolvedValueOnce({
-        events: mockEvents,
-        pagination: { page: 1, total: 50, totalPages: 3, hasNext: true, hasPrev: false },
-      });
+  it('should load the previous page when Previous is clicked', async () => {
+    mockPagedEvents(3);
+    renderPage();
+    await screen.findByText('Story on page 1');
 
-    renderWithRouter();
-
-    await waitFor(() => {
-      expect(screen.getByText('Next')).toBeInTheDocument();
-    });
-
-    // Go to page 2
     fireEvent.click(screen.getByText('Next'));
-
-    await waitFor(() => {
-      expect(screen.getByText('Previous')).not.toBeDisabled();
-    });
-
-    // Go back to page 1
+    await screen.findByText('Story on page 2');
     fireEvent.click(screen.getByText('Previous'));
 
-    await waitFor(() => {
-      expect(eventsApi.list).toHaveBeenCalledWith(
-        expect.objectContaining({ page: 1 })
-      );
-    });
+    expect(await screen.findByText('Story on page 1')).toBeInTheDocument();
+    expect(requestsTo('GET /events').map((r) => r.query.page)).toEqual(['1', '2', '1']);
   });
 
-  it('should handle different categories', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: [],
-      pagination: { page: 1, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
-    });
+  it('should disable Next on the last page', async () => {
+    mockPagedEvents(2);
+    renderPage();
+    await screen.findByText('Story on page 1');
 
-    renderWithRouter('politics');
+    fireEvent.click(screen.getByText('Next'));
 
-    await waitFor(() => {
-      expect(screen.getByText('Politics News')).toBeInTheDocument();
-      expect(screen.getByText('No politics news found')).toBeInTheDocument();
-    });
+    await screen.findByText('Page 2 of 2');
+    expect(screen.getByText('Next')).toBeDisabled();
+    expect(screen.getByText('Previous')).toBeEnabled();
   });
 
-  it('should handle unknown category', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: [],
-      pagination: { page: 1, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
-    });
+  it('should label other known categories', async () => {
+    mockFetch({ 'GET /events': ok([], pageInfo(1, 0, 0)) });
 
-    renderWithRouter('unknown');
+    renderPage('politics');
 
-    await waitFor(() => {
-      expect(screen.getByText('unknown News')).toBeInTheDocument();
-    });
+    expect(await screen.findByText('Politics News')).toBeInTheDocument();
+    expect(screen.getByText('Politics', { selector: 'span' })).toHaveClass('bg-purple-100');
+    expect(requestsTo('GET /events')[0].query.category).toBe('POLITICS');
   });
 
-  it('should call API with correct category parameter', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should fall back to the raw name and grey badge for an unknown category', async () => {
+    mockFetch({ 'GET /events': ok([], pageInfo(1, 0, 0)) });
 
-    renderWithRouter('science');
+    renderPage('unknown-cat');
 
-    await waitFor(() => {
-      expect(eventsApi.list).toHaveBeenCalledWith({
-        category: 'SCIENCE',
-        page: 1,
-        limit: 20,
-      });
-    });
+    expect(await screen.findByText('unknown-cat News')).toBeInTheDocument();
+    expect(screen.getByText('unknown-cat', { selector: 'span' })).toHaveClass('bg-gray-100');
+    expect(requestsTo('GET /events')[0].query.category).toBe('UNKNOWN-CAT');
   });
 
-  it('should show more than 5 sources indicator', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    const eventWithManySources = {
-      ...mockEvents[0],
-      sources: [
-        { id: 's1', name: 'Source1', biasRating: 'CENTER' },
-        { id: 's2', name: 'Source2', biasRating: 'LEFT' },
-        { id: 's3', name: 'Source3', biasRating: 'RIGHT' },
-        { id: 's4', name: 'Source4', biasRating: 'CENTER' },
-        { id: 's5', name: 'Source5', biasRating: 'LEFT' },
-        { id: 's6', name: 'Source6', biasRating: 'RIGHT' },
-        { id: 's7', name: 'Source7', biasRating: 'CENTER' },
-      ],
-    };
-    eventsApi.list.mockResolvedValue({
-      events: [eventWithManySources],
-      pagination: { page: 1, total: 1, totalPages: 1, hasNext: false, hasPrev: false },
-    });
-
-    renderWithRouter();
-
-    await waitFor(() => {
-      expect(screen.getByText('+2')).toBeInTheDocument();
-    });
-  });
-
-  it('should handle API errors gracefully', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
+  it('should log and show the empty state on API errors', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    eventsApi.list.mockRejectedValue(new Error('API Error'));
+    mockFetch({ 'GET /events': fail(500, 'INTERNAL_ERROR', 'API Error') });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(consoleSpy).toHaveBeenCalled();
-    });
-
-    consoleSpy.mockRestore();
+    expect(await screen.findByText('No technology news found')).toBeInTheDocument();
+    expect(consoleSpy).toHaveBeenCalledWith('Failed to fetch events:', expect.objectContaining({ message: 'API Error' }));
   });
 
-  it('should not show pagination for single page', async () => {
-    const { eventsApi } = vi.mocked(await import('../lib/api'));
-    eventsApi.list.mockResolvedValue({
-      events: mockEvents,
-      pagination: { page: 1, total: 2, totalPages: 1, hasNext: false, hasPrev: false },
-    });
+  it('should not show pagination for a single page', async () => {
+    mockFetch({ 'GET /events': ok(mockEvents, pageInfo(1, 2, 1)) });
 
-    renderWithRouter();
+    renderPage();
 
-    await waitFor(() => {
-      expect(screen.getByText('Technology News Event')).toBeInTheDocument();
-    });
-
+    await screen.findByText('Technology News Event');
     expect(screen.queryByText('Previous')).not.toBeInTheDocument();
     expect(screen.queryByText('Next')).not.toBeInTheDocument();
   });
