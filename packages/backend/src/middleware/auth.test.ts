@@ -1,53 +1,40 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { ERROR_CODES } from '@hvnp/shared';
-
-// Use vi.hoisted to define mocks that need to be available when vi.mock runs
-const { mockPrisma, mockSession } = vi.hoisted(() => ({
-  mockPrisma: {
-    session: {
-      findUnique: vi.fn(),
-      update: vi.fn(),
-    },
-  },
-  mockSession: {
-    id: 'session-123',
-    userId: 'user-123',
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    user: {
-      id: 'user-123',
-      displayName: 'TestUser',
-      alienId: 'alien-123',
-      isBanned: false,
-      karma: 100,
-    },
-  },
-}));
-
-// Mock config
-vi.mock('../config/index.js', () => ({
-  config: {
-    jwt: {
-      secret: 'test-secret',
-    },
-  },
-}));
-
-// Mock prisma
-vi.mock('../db/client.js', () => ({
-  prisma: mockPrisma,
-}));
-
-// Import after mocks are set up
+import { config } from '../config/index.js';
+import { prisma } from '../db/client.js';
+import { resetDatabase, createUser } from '../test/db.js';
 import { requireAuth, optionalAuth, AuthenticatedRequest } from './auth.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function createSession(
+  options: { isBanned?: boolean; banReason?: string | null; expiresAt?: Date } = {}
+) {
+  const user = await createUser({ isBanned: options.isBanned, banReason: options.banReason });
+  const session = await prisma.session.create({
+    data: {
+      userId: user.id,
+      token: `token-${user.id}`,
+      expiresAt: options.expiresAt ?? new Date(Date.now() + DAY_MS),
+      lastActivityAt: new Date(Date.now() - DAY_MS),
+    },
+  });
+  const token = jwt.sign(
+    { userId: user.id, sessionId: session.id, alienId: user.alienId },
+    config.jwt.secret
+  );
+  return { user, session, token };
+}
 
 describe('Auth Middleware', () => {
   let mockReq: Partial<AuthenticatedRequest>;
   let mockRes: Partial<Response>;
   let mockNext: ReturnType<typeof vi.fn>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await resetDatabase();
     mockReq = {
       headers: {},
     };
@@ -56,11 +43,10 @@ describe('Auth Middleware', () => {
       json: vi.fn().mockReturnThis(),
     };
     mockNext = vi.fn();
-    vi.clearAllMocks();
+  });
 
-    // Reset mockSession expiresAt to future date
-    mockSession.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    mockSession.user.isBanned = false;
+  afterAll(async () => {
+    await prisma.$disconnect();
   });
 
   describe('requireAuth', () => {
@@ -91,6 +77,7 @@ describe('Auth Middleware', () => {
           message: 'Authentication required',
         },
       });
+      expect(mockNext).not.toHaveBeenCalled();
     });
 
     it('should reject invalid token', async () => {
@@ -106,12 +93,35 @@ describe('Auth Middleware', () => {
           message: 'Invalid token',
         },
       });
+      expect(mockNext).not.toHaveBeenCalled();
+    });
+
+    it('should reject token signed with a different secret', async () => {
+      const { user, session } = await createSession();
+      const forged = jwt.sign(
+        { userId: user.id, sessionId: session.id, alienId: user.alienId },
+        'not-the-real-secret'
+      );
+      mockReq.headers = { authorization: `Bearer ${forged}` };
+
+      await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
+
+      expect(mockRes.status).toHaveBeenCalledWith(401);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.AUTH_INVALID_TOKEN,
+          message: 'Invalid token',
+        },
+      });
+      expect(mockReq.user).toBeUndefined();
     });
 
     it('should reject expired token', async () => {
+      const { user, session } = await createSession();
       const expiredToken = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret',
+        { userId: user.id, sessionId: session.id, alienId: user.alienId },
+        config.jwt.secret,
         { expiresIn: '-1h' }
       );
       mockReq.headers = { authorization: `Bearer ${expiredToken}` };
@@ -126,15 +136,13 @@ describe('Auth Middleware', () => {
           message: 'Token has expired',
         },
       });
+      expect(mockNext).not.toHaveBeenCalled();
     });
 
     it('should reject when session not found', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { token } = await createSession();
+      await prisma.session.deleteMany();
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue(null);
 
       await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
@@ -146,34 +154,29 @@ describe('Auth Middleware', () => {
           message: 'Session has expired',
         },
       });
+      expect(mockNext).not.toHaveBeenCalled();
     });
 
-    it('should reject when session is expired', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+    it('should reject when session expired', async () => {
+      const { token } = await createSession({ expiresAt: new Date(Date.now() - 1000) });
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue({
-        ...mockSession,
-        expiresAt: new Date(Date.now() - 1000),
-      });
 
       await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
       expect(mockRes.status).toHaveBeenCalledWith(401);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        success: false,
+        error: {
+          code: ERROR_CODES.AUTH_TOKEN_EXPIRED,
+          message: 'Session has expired',
+        },
+      });
+      expect(mockNext).not.toHaveBeenCalled();
     });
 
     it('should reject banned user', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { token } = await createSession({ isBanned: true, banReason: 'Violation' });
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue({
-        ...mockSession,
-        user: { ...mockSession.user, isBanned: true, banReason: 'Violation' },
-      });
 
       await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
@@ -186,40 +189,32 @@ describe('Auth Middleware', () => {
           details: { reason: 'Violation' },
         },
       });
+      expect(mockNext).not.toHaveBeenCalled();
     });
 
     it('should authenticate valid request', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { user, session, token } = await createSession();
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue(mockSession);
-      mockPrisma.session.update.mockResolvedValue(mockSession);
 
       await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
-      expect(mockReq.user).toEqual(mockSession.user);
-      expect(mockReq.userId).toBe('user-123');
-      expect(mockReq.sessionId).toBe('session-123');
+      expect(mockReq.user).toEqual(user);
+      expect(mockReq.userId).toBe(user.id);
+      expect(mockReq.sessionId).toBe(session.id);
       expect(mockNext).toHaveBeenCalledWith();
+      expect(mockRes.status).not.toHaveBeenCalled();
     });
 
     it('should update last activity on successful auth', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { session, token } = await createSession();
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue(mockSession);
-      mockPrisma.session.update.mockResolvedValue(mockSession);
+      const before = Date.now();
 
       await requireAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
-      expect(mockPrisma.session.update).toHaveBeenCalledWith({
-        where: { id: mockSession.id },
-        data: { lastActivityAt: expect.any(Date) },
-      });
+      const updated = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
+      expect(updated.lastActivityAt.getTime()).toBeGreaterThanOrEqual(before);
+      expect(updated.lastActivityAt.getTime()).toBeGreaterThan(session.lastActivityAt.getTime());
     });
   });
 
@@ -229,6 +224,7 @@ describe('Auth Middleware', () => {
 
       expect(mockReq.user).toBeUndefined();
       expect(mockNext).toHaveBeenCalledWith();
+      expect(mockRes.status).not.toHaveBeenCalled();
     });
 
     it('should continue with invalid token', async () => {
@@ -238,33 +234,26 @@ describe('Auth Middleware', () => {
 
       expect(mockReq.user).toBeUndefined();
       expect(mockNext).toHaveBeenCalledWith();
+      expect(mockRes.status).not.toHaveBeenCalled();
     });
 
-    it('should populate user with valid token', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+    it('should populate user with valid token and update last activity', async () => {
+      const { user, session, token } = await createSession();
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue(mockSession);
-      mockPrisma.session.update.mockResolvedValue(mockSession);
 
       await optionalAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
-      expect(mockReq.user).toEqual(mockSession.user);
+      expect(mockReq.user).toEqual(user);
+      expect(mockReq.userId).toBe(user.id);
+      expect(mockReq.sessionId).toBe(session.id);
       expect(mockNext).toHaveBeenCalledWith();
+      const updated = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
+      expect(updated.lastActivityAt.getTime()).toBeGreaterThan(session.lastActivityAt.getTime());
     });
 
     it('should not populate user if session expired', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { token } = await createSession({ expiresAt: new Date(Date.now() - 1000) });
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue({
-        ...mockSession,
-        expiresAt: new Date(Date.now() - 1000),
-      });
 
       await optionalAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 
@@ -273,15 +262,8 @@ describe('Auth Middleware', () => {
     });
 
     it('should not populate user if user is banned', async () => {
-      const token = jwt.sign(
-        { userId: 'user-123', sessionId: 'session-123', alienId: 'alien-123' },
-        'test-secret'
-      );
+      const { token } = await createSession({ isBanned: true });
       mockReq.headers = { authorization: `Bearer ${token}` };
-      mockPrisma.session.findUnique.mockResolvedValue({
-        ...mockSession,
-        user: { ...mockSession.user, isBanned: true },
-      });
 
       await optionalAuth(mockReq as AuthenticatedRequest, mockRes as Response, mockNext);
 

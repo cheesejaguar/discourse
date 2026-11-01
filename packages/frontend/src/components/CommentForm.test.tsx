@@ -3,211 +3,159 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import CommentForm from './CommentForm';
 import { useAuthStore } from '../store/auth';
+import { mockFetch, ok, fail, requests, pending } from '../test/fetch';
 
-// Mock the auth store
-vi.mock('../store/auth', () => ({
-  useAuthStore: vi.fn(),
-}));
-
-// Mock the commentsApi
-vi.mock('../lib/api', () => ({
-  commentsApi: {
-    create: vi.fn(),
-  },
-}));
+const createdComment = {
+  id: 'c1',
+  eventId: 'e1',
+  parentId: null,
+  content: 'Test comment',
+  score: 1,
+  upvotes: 1,
+  downvotes: 0,
+  replyCount: 0,
+  isEdited: false,
+  isDeleted: false,
+  isHidden: false,
+  createdAt: '2024-01-01T00:00:00Z',
+  updatedAt: '2024-01-01T00:00:00Z',
+  author: { id: '1', displayName: 'testUser', karma: 100 },
+};
 
 describe('CommentForm', () => {
-  const mockOnCommentAdded = vi.fn();
-  const mockOnCancel = vi.fn();
-  const mockUser = {
-    id: '1',
-    displayName: 'TestUser',
-    karma: 100,
-  };
-
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(useAuthStore).mockReturnValue({
-      user: mockUser,
+    useAuthStore.setState({
+      user: { id: '1', displayName: 'testUser', karma: 100, isVerified: true, createdAt: '2024-01-01' },
+      token: 'test-token',
+      isAuthenticated: true,
     });
+    useAuthStore.getState().setToken('test-token');
   });
 
   it('should render the form', () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
 
-    expect(screen.getByPlaceholderText('Share your thoughts...')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Post/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Share your thoughts...')).toHaveAttribute('maxLength', '10000');
+    expect(screen.getByRole('button', { name: 'Post' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
-  it('should display user avatar initial', () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+  it('should display the capitalised user avatar initial', () => {
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
 
     expect(screen.getByText('T')).toBeInTheDocument();
   });
 
   it('should use custom placeholder', () => {
-    render(
-      <CommentForm
-        eventId="e1"
-        onCommentAdded={mockOnCommentAdded}
-        placeholder="Custom placeholder"
-      />
-    );
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} placeholder="Custom placeholder" />);
 
     expect(screen.getByPlaceholderText('Custom placeholder')).toBeInTheDocument();
   });
 
-  it('should show cancel button when onCancel provided', () => {
-    render(
-      <CommentForm
-        eventId="e1"
-        onCommentAdded={mockOnCommentAdded}
-        onCancel={mockOnCancel}
-      />
-    );
-
-    expect(screen.getByRole('button', { name: /Cancel/i })).toBeInTheDocument();
-  });
-
   it('should call onCancel when cancel button clicked', () => {
-    render(
-      <CommentForm
-        eventId="e1"
-        onCommentAdded={mockOnCommentAdded}
-        onCancel={mockOnCancel}
-      />
-    );
+    const onCancel = vi.fn();
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} onCancel={onCancel} />);
 
-    fireEvent.click(screen.getByRole('button', { name: /Cancel/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-    expect(mockOnCancel).toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
   it('should show character count', async () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
 
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, 'Hello');
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), 'Hello');
 
     expect(screen.getByText('5/10,000 characters')).toBeInTheDocument();
   });
 
-  it('should disable post button when content is empty', () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+  it('should disable post button when content is empty or whitespace', async () => {
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
 
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    expect(postButton).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), '   ');
+    expect(screen.getByRole('button', { name: 'Post' })).toBeDisabled();
   });
 
   it('should enable post button when content is not empty', async () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
 
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, 'Test comment');
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), 'Test comment');
 
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    expect(postButton).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Post' })).toBeEnabled();
   });
 
-  it('should submit comment successfully', async () => {
-    const mockComment = { id: 'c1', content: 'Test comment' };
-    const { commentsApi } = await import('../lib/api');
-    vi.mocked(commentsApi.create).mockResolvedValue(mockComment as any);
+  it('should POST the trimmed comment with auth and pass the created comment back', async () => {
+    mockFetch({ 'POST /comments': ok(createdComment) });
+    const onCommentAdded = vi.fn();
+    render(<CommentForm eventId="e1" onCommentAdded={onCommentAdded} />);
 
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), '  Test comment  ');
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }));
 
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, 'Test comment');
-
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    fireEvent.click(postButton);
-
-    await waitFor(() => {
-      expect(commentsApi.create).toHaveBeenCalledWith({
-        eventId: 'e1',
-        parentId: undefined,
-        content: 'Test comment',
-      });
-      expect(mockOnCommentAdded).toHaveBeenCalledWith(mockComment);
-    });
+    await waitFor(() => expect(onCommentAdded).toHaveBeenCalledWith(createdComment));
+    expect(requests[0].body).toEqual({ eventId: 'e1', content: 'Test comment' });
+    expect(requests[0].headers.Authorization).toBe('Bearer test-token');
   });
 
   it('should include parentId when replying', async () => {
-    const mockComment = { id: 'c1', content: 'Reply' };
-    const { commentsApi } = await import('../lib/api');
-    vi.mocked(commentsApi.create).mockResolvedValue(mockComment as any);
+    mockFetch({ 'POST /comments': ok({ ...createdComment, parentId: 'p1', content: 'Reply' }) });
+    const onCommentAdded = vi.fn();
+    render(<CommentForm eventId="e1" parentId="p1" onCommentAdded={onCommentAdded} />);
 
-    render(
-      <CommentForm
-        eventId="e1"
-        parentId="p1"
-        onCommentAdded={mockOnCommentAdded}
-      />
-    );
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), 'Reply');
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }));
 
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, 'Reply');
+    await waitFor(() => expect(onCommentAdded).toHaveBeenCalled());
+    expect(requests[0].body).toEqual({ eventId: 'e1', parentId: 'p1', content: 'Reply' });
+  });
 
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    fireEvent.click(postButton);
+  it('should show a spinner and disable the button while submitting', async () => {
+    mockFetch({ 'POST /comments': () => pending() });
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
+
+    await userEvent.type(screen.getByPlaceholderText('Share your thoughts...'), 'Test');
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }));
 
     await waitFor(() => {
-      expect(commentsApi.create).toHaveBeenCalledWith({
-        eventId: 'e1',
-        parentId: 'p1',
-        content: 'Reply',
-      });
+      const submit = document.querySelector('button[type="submit"]')!;
+      expect(submit).toBeDisabled();
+      expect(submit.querySelector('svg.animate-spin')).toBeInTheDocument();
     });
   });
 
-  it('should show error on submit failure', async () => {
-    const { commentsApi } = await import('../lib/api');
-    vi.mocked(commentsApi.create).mockRejectedValue(new Error('Failed to post'));
-
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
-
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, 'Test');
-
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    fireEvent.click(postButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Failed to post')).toBeInTheDocument();
-    });
-  });
-
-  it('should show error for empty content', async () => {
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
-
-    const textarea = screen.getByPlaceholderText('Share your thoughts...');
-    await userEvent.type(textarea, '   ');
-    await userEvent.clear(textarea);
-
-    // Type and submit to trigger validation
-    const form = textarea.closest('form');
-    fireEvent.submit(form!);
-
-    await waitFor(() => {
-      expect(screen.getByText('Comment cannot be empty')).toBeInTheDocument();
-    });
-  });
-
-  it('should clear content after successful submit', async () => {
-    const mockComment = { id: 'c1', content: 'Test' };
-    const { commentsApi } = await import('../lib/api');
-    vi.mocked(commentsApi.create).mockResolvedValue(mockComment as any);
-
-    render(<CommentForm eventId="e1" onCommentAdded={mockOnCommentAdded} />);
+  it('should show the server error and keep the content on submit failure', async () => {
+    mockFetch({ 'POST /comments': fail(429, 'RATE_LIMIT_EXCEEDED', 'Comment rate limit exceeded.') });
+    const onCommentAdded = vi.fn();
+    render(<CommentForm eventId="e1" onCommentAdded={onCommentAdded} />);
 
     const textarea = screen.getByPlaceholderText('Share your thoughts...') as HTMLTextAreaElement;
     await userEvent.type(textarea, 'Test');
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }));
 
-    const postButton = screen.getByRole('button', { name: /Post/i });
-    fireEvent.click(postButton);
+    expect(await screen.findByText('Comment rate limit exceeded.')).toBeInTheDocument();
+    expect(textarea.value).toBe('Test');
+    expect(onCommentAdded).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() => {
-      expect(textarea.value).toBe('');
-    });
+  it('should show a validation error and not POST when submitting empty content', async () => {
+    mockFetch({});
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
+
+    fireEvent.submit(screen.getByPlaceholderText('Share your thoughts...').closest('form')!);
+
+    expect(await screen.findByText('Comment cannot be empty')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('should clear content after successful submit', async () => {
+    mockFetch({ 'POST /comments': ok(createdComment) });
+    render(<CommentForm eventId="e1" onCommentAdded={vi.fn()} />);
+
+    const textarea = screen.getByPlaceholderText('Share your thoughts...') as HTMLTextAreaElement;
+    await userEvent.type(textarea, 'Test');
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }));
+
+    await waitFor(() => expect(textarea.value).toBe(''));
   });
 });

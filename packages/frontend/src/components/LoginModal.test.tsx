@@ -1,119 +1,100 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import LoginModal from './LoginModal';
 import { useAuthStore } from '../store/auth';
+import { mockFetch, ok, fail, requests, pending } from '../test/fetch';
 
-// Mock the auth store
-vi.mock('../store/auth', () => ({
-  useAuthStore: vi.fn(),
-}));
+const loginResponse = {
+  user: { id: '1', displayName: 'TestUser', karma: 0, isVerified: true, createdAt: '2024-01-01' },
+  token: 'jwt-token',
+  expiresAt: '2024-12-31',
+};
 
 describe('LoginModal', () => {
-  const mockOnClose = vi.fn();
-  const mockLogin = vi.fn();
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(useAuthStore).mockReturnValue({
-      login: mockLogin,
-      isLoading: false,
-    });
-  });
-
   it('should render the modal', () => {
-    render(<LoginModal onClose={mockOnClose} />);
+    render(<LoginModal onClose={vi.fn()} />);
 
     expect(screen.getByText('Welcome')).toBeInTheDocument();
     expect(screen.getByText('Sign in with Alien.org to join the discussion')).toBeInTheDocument();
   });
 
   it('should render display name input', () => {
-    render(<LoginModal onClose={mockOnClose} />);
+    render(<LoginModal onClose={vi.fn()} />);
 
-    expect(screen.getByLabelText(/Display Name/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Display Name/i)).toHaveAttribute('placeholder', 'Choose a username');
   });
 
   it('should call onClose when backdrop is clicked', () => {
-    render(<LoginModal onClose={mockOnClose} />);
+    const onClose = vi.fn();
+    render(<LoginModal onClose={onClose} />);
 
-    const backdrop = document.querySelector('.bg-black\\/50');
-    fireEvent.click(backdrop!);
+    fireEvent.click(document.querySelector('.bg-black\\/50')!);
 
-    expect(mockOnClose).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('should call onClose when close button is clicked', () => {
-    render(<LoginModal onClose={mockOnClose} />);
+    const onClose = vi.fn();
+    render(<LoginModal onClose={onClose} />);
 
-    const closeButton = screen.getByRole('button', { name: '' });
-    fireEvent.click(closeButton);
+    fireEvent.click(screen.getByRole('button', { name: '' }));
 
-    expect(mockOnClose).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('should call login on form submit', async () => {
-    mockLogin.mockResolvedValue(undefined);
-    render(<LoginModal onClose={mockOnClose} />);
+  it('should log in with the typed display name and close', async () => {
+    mockFetch({ 'POST /auth/dev-login': ok(loginResponse) });
+    const onClose = vi.fn();
+    render(<LoginModal onClose={onClose} />);
 
-    const input = screen.getByLabelText(/Display Name/i);
-    await userEvent.type(input, 'TestUser');
+    await userEvent.type(screen.getByLabelText(/Display Name/i), 'TestUser');
+    fireEvent.click(screen.getByRole('button', { name: /Sign in with Alien ID/i }));
 
-    const submitButton = screen.getByRole('button', { name: /Sign in with Alien ID/i });
-    fireEvent.click(submitButton);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(requests[0].body).toEqual({ displayName: 'TestUser' });
+    expect(useAuthStore.getState()).toMatchObject({
+      token: 'jwt-token',
+      isAuthenticated: true,
+      user: loginResponse.user,
+    });
+  });
+
+  it('should log in without a display name if empty', async () => {
+    mockFetch({ 'POST /auth/dev-login': ok(loginResponse) });
+    const onClose = vi.fn();
+    render(<LoginModal onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Sign in with Alien ID/i }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    // undefined displayName is dropped by JSON.stringify
+    expect(requests[0].body).toEqual({});
+  });
+
+  it('should display the server error on login failure and stay open', async () => {
+    mockFetch({ 'POST /auth/dev-login': fail(400, 'VALIDATION_ERROR', 'Display name already taken') });
+    const onClose = vi.fn();
+    render(<LoginModal onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Sign in with Alien ID/i }));
+
+    expect(await screen.findByText('Display name already taken')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+  });
+
+  it('should show a disabled spinner button while logging in', async () => {
+    mockFetch({ 'POST /auth/dev-login': () => pending() });
+    render(<LoginModal onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Sign in with Alien ID/i }));
 
     await waitFor(() => {
-      expect(mockLogin).toHaveBeenCalledWith('TestUser');
+      const submitButton = document.querySelector('button[type="submit"]');
+      expect(submitButton).toBeDisabled();
+      expect(submitButton?.querySelector('svg.animate-spin')).toBeInTheDocument();
     });
-  });
-
-  it('should call login without display name if empty', async () => {
-    mockLogin.mockResolvedValue(undefined);
-    render(<LoginModal onClose={mockOnClose} />);
-
-    const submitButton = screen.getByRole('button', { name: /Sign in with Alien ID/i });
-    fireEvent.click(submitButton);
-
-    await waitFor(() => {
-      expect(mockLogin).toHaveBeenCalledWith(undefined);
-    });
-  });
-
-  it('should display error on login failure', async () => {
-    mockLogin.mockRejectedValue(new Error('Login failed'));
-    render(<LoginModal onClose={mockOnClose} />);
-
-    const submitButton = screen.getByRole('button', { name: /Sign in with Alien ID/i });
-    fireEvent.click(submitButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Login failed')).toBeInTheDocument();
-    });
-  });
-
-  it('should show loading state', () => {
-    vi.mocked(useAuthStore).mockReturnValue({
-      login: mockLogin,
-      isLoading: true,
-    });
-
-    render(<LoginModal onClose={mockOnClose} />);
-
-    // During loading, button shows only spinner (no text), find by type="submit"
-    const submitButton = document.querySelector('button[type="submit"]');
-    expect(submitButton).toBeInTheDocument();
-    expect(submitButton?.querySelector('svg.animate-spin')).toBeInTheDocument();
-  });
-
-  it('should close modal on successful login', async () => {
-    mockLogin.mockResolvedValue(undefined);
-    render(<LoginModal onClose={mockOnClose} />);
-
-    const submitButton = screen.getByRole('button', { name: /Sign in with Alien ID/i });
-    fireEvent.click(submitButton);
-
-    await waitFor(() => {
-      expect(mockOnClose).toHaveBeenCalled();
-    });
+    expect(screen.queryByText('Sign in with Alien ID')).not.toBeInTheDocument();
   });
 });

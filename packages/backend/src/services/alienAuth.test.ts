@@ -1,18 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import crypto from 'crypto';
 import { AlienAuthService, alienAuthService } from './alienAuth.js';
-
-// Mock config
-vi.mock('../config/index.js', () => ({
-  config: {
-    isDev: true,
-    alien: {
-      apiUrl: 'https://api.alien.test',
-      appId: 'test-app-id',
-      appSecret: 'test-app-secret',
-    },
-    corsOrigin: 'http://localhost:5173',
-  },
-}));
+import { config } from '../config/index.js';
 
 describe('AlienAuthService', () => {
   let service: AlienAuthService;
@@ -32,6 +21,24 @@ describe('AlienAuthService', () => {
       expect(challenge.qrCodeUrl).toContain('alien://verify');
       expect(challenge.expiresAt).toBeInstanceOf(Date);
       expect(challenge.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('should encode the app id, challenge id and callback URL in the QR payload', async () => {
+      const before = Date.now();
+      const challenge = await service.generateChallenge();
+
+      const url = new URL(challenge.qrCodeUrl);
+      expect(url.protocol).toBe('alien:');
+      const data = JSON.parse(Buffer.from(url.searchParams.get('data')!, 'base64').toString());
+      expect(data).toEqual({
+        appId: config.alien.appId,
+        challengeId: challenge.challengeId,
+        nonce: expect.stringMatching(/^[a-f0-9]{64}$/),
+        timestamp: expect.any(Number),
+        callbackUrl: `${config.corsOrigin}/auth/callback`,
+      });
+      expect(challenge.expiresAt.getTime()).toBe(data.timestamp + 5 * 60 * 1000);
+      expect(data.timestamp).toBeGreaterThanOrEqual(before);
     });
 
     it('should generate unique challenge IDs', async () => {
@@ -71,49 +78,14 @@ describe('AlienAuthService', () => {
       expect(result.error).toBe('Authentication payload has expired');
     });
 
-    it('should accept payload without alienId in dev mode (falls through to API mock)', async () => {
-      // In dev mode, even incomplete payloads are accepted via the API mock
-      const payload = {
-        alienId: '',
-        signature: 'test',
-        timestamp: Date.now(),
-        nonce: 'test',
-      };
+    it.each([
+      ['alienId', { alienId: '', signature: 'sig', nonce: 'nonce' }],
+      ['signature', { alienId: 'alien_1', signature: '', nonce: 'nonce' }],
+      ['nonce', { alienId: 'alien_1', signature: 'sig', nonce: '' }],
+    ])('should reject a payload missing %s', async (_field, fields) => {
+      const result = await service.verifyPayload({ ...fields, timestamp: Date.now() });
 
-      const result = await service.verifyPayload(payload);
-
-      // Dev mode accepts all payloads with valid timestamp
-      expect(result.isValid).toBe(true);
-    });
-
-    it('should accept payload without signature in dev mode (falls through to API mock)', async () => {
-      // In dev mode, even incomplete payloads are accepted via the API mock
-      const payload = {
-        alienId: 'test',
-        signature: '',
-        timestamp: Date.now(),
-        nonce: 'test',
-      };
-
-      const result = await service.verifyPayload(payload);
-
-      // Dev mode accepts all payloads with valid timestamp
-      expect(result.isValid).toBe(true);
-    });
-
-    it('should accept payload without nonce in dev mode (falls through to API mock)', async () => {
-      // In dev mode, even incomplete payloads are accepted via the API mock
-      const payload = {
-        alienId: 'test',
-        signature: 'test',
-        timestamp: Date.now(),
-        nonce: '',
-      };
-
-      const result = await service.verifyPayload(payload);
-
-      // Dev mode accepts all payloads with valid timestamp
-      expect(result.isValid).toBe(true);
+      expect(result).toEqual({ isValid: false, error: 'Invalid authentication payload' });
     });
   });
 
@@ -144,14 +116,14 @@ describe('AlienAuthService', () => {
     it('should generate a valid mock payload', () => {
       const payload = AlienAuthService.generateMockPayload();
 
-      expect(payload).toHaveProperty('alienId');
-      expect(payload).toHaveProperty('signature');
-      expect(payload).toHaveProperty('timestamp');
-      expect(payload).toHaveProperty('nonce');
-      expect(payload.alienId).toMatch(/^alien_/);
-      expect(payload.signature).toBeTruthy();
-      expect(payload.timestamp).toBeGreaterThan(0);
-      expect(payload.nonce).toBeTruthy();
+      expect(payload.alienId).toMatch(/^alien_[a-f0-9]{32}$/);
+      expect(payload.nonce).toMatch(/^[a-f0-9]{32}$/);
+      expect(Math.abs(payload.timestamp - Date.now())).toBeLessThan(5000);
+      const expectedSignature = crypto
+        .createHash('sha256')
+        .update(`${payload.alienId}:${payload.timestamp}:${payload.nonce}`)
+        .digest('hex');
+      expect(payload.signature).toBe(expectedSignature);
     });
 
     it('should use provided alienId', () => {
@@ -159,6 +131,34 @@ describe('AlienAuthService', () => {
       const payload = AlienAuthService.generateMockPayload(alienId);
 
       expect(payload.alienId).toBe(alienId);
+    });
+  });
+
+  describe('in production mode', () => {
+    let ProdService: typeof AlienAuthService;
+
+    beforeEach(async () => {
+      process.env.NODE_ENV = 'production';
+      vi.resetModules();
+      ({ AlienAuthService: ProdService } = await import('./alienAuth.js'));
+    });
+
+    afterEach(() => {
+      process.env.NODE_ENV = 'test';
+      vi.resetModules();
+    });
+
+    it('should not accept payloads without a configured Alien API', async () => {
+      const result = await new ProdService().verifyPayload(ProdService.generateMockPayload());
+
+      expect(result).toEqual({
+        isValid: false,
+        error: 'Alien.org API credentials not configured',
+      });
+    });
+
+    it('should not report an Alien ID as verified', async () => {
+      await expect(new ProdService().verifyAlienIdStatus('alien_1')).resolves.toBe(false);
     });
   });
 

@@ -1,6 +1,13 @@
 import { defineConfig } from 'vitest/config';
+import path from 'path';
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // Test against the shared package's source so tests don't depend on a prior build.
+      '@hvnp/shared': path.resolve(__dirname, '../shared/src/index.ts'),
+    },
+  },
   test: {
     globals: true,
     environment: 'node',
@@ -14,6 +21,7 @@ export default defineConfig({
         'src/**/*.spec.ts',
         'src/index.ts',
         'src/db/seed.ts',
+        'src/test/**',
       ],
       thresholds: {
         statements: 100,
@@ -23,5 +31,8 @@ export default defineConfig({
       },
     },
     setupFiles: ['./src/test/setup.ts'],
+    globalSetup: ['./src/test/globalSetup.ts'],
+    // All test files share one real PostgreSQL database.
+    fileParallelism: false,
   },
 });
